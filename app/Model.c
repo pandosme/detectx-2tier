@@ -104,6 +104,33 @@ static const char* CUSTOM_LABELS_PATH = "localdata/labels.txt";
 static const char* activeModelPath = NULL;
 static const char* activeLabelsPath = NULL;
 
+static const char* CLASSIFIER_MODEL_PATH = "model/classifier.tflite";
+static const char* CLASSIFIER_LABELS_PATH = "model/classifier-labels.txt";
+static larodModel* classifierModel = NULL;
+static larodJobRequest* classifierReq = NULL;
+static larodTensor** classifierInputTensors = NULL;
+static larodTensor** classifierOutputTensors = NULL;
+static void* classifierInputAddr = MAP_FAILED;
+static void* classifierOutputAddr = MAP_FAILED;
+static int classifierInputFd = -1;
+static int classifierOutputFd = -1;
+static int classifierModelFd = -1;
+static size_t classifierInputSize = 0;
+static size_t classifierOutputSize = 0;
+static unsigned int classifierWidth = 0;
+static unsigned int classifierHeight = 0;
+static unsigned int classifierChannels = 0;
+static unsigned int classifierClasses = 0;
+static float classifierQuant = 1.0f;
+static int classifierZero = 0;
+static float classifierCropMargin = 1.25f;
+static char** classifierLabels = NULL;
+static char* classifierLabelBuffer = NULL;
+static size_t numClassifierLabels = 0;
+static int classifierReady = 0;
+static char CLASSIFIER_INPUT_FILE_PATTERN[] = "/tmp/larod.classifier.in-XXXXXX";
+static char CLASSIFIER_OUTPUT_FILE_PATTERN[] = "/tmp/larod.classifier.out-XXXXXX";
+
 static char PP_SD_INPUT_FILE_PATTERN[] = "/tmp/larod.pp.test-XXXXXX";
 static char OBJECT_DETECTOR_INPUT_FILE_PATTERN[] = "/tmp/larod.in.test-XXXXXX";
 static char OBJECT_DETECTOR_OUT1_FILE_PATTERN[]  = "/tmp/larod.out1.test-XXXXXX";
@@ -275,6 +302,176 @@ hd_preprocessing_setup(void) {
     return 1;
 }
 
+static int
+classifier_setup(const larodDevice* device) {
+    larodError* error = NULL;
+    size_t inputCount = 1;
+    size_t outputCount = 1;
+
+    if (!ACAP_FILE_Exists(CLASSIFIER_MODEL_PATH)) {
+        LOG("Stage 2 model not present; running detector-only\n");
+        return 0;
+    }
+    classifierModelFd = open(CLASSIFIER_MODEL_PATH, O_RDONLY);
+    if (classifierModelFd < 0) {
+        LOG_WARN("%s: Could not open %s: %s\n", __func__, CLASSIFIER_MODEL_PATH, strerror(errno));
+        return 0;
+    }
+    classifierModel = larodLoadModel(conn, classifierModelFd, device, LAROD_ACCESS_PRIVATE,
+                                     "classifier", NULL, &error);
+    if (!classifierModel) {
+        LOG_WARN("%s: Unable to load stage 2: %s\n", __func__, error ? error->msg : "");
+        larodClearError(&error);
+        return 0;
+    }
+    classifierInputTensors = larodCreateModelInputs(classifierModel, &inputCount, &error);
+    classifierOutputTensors = larodCreateModelOutputs(classifierModel, &outputCount, &error);
+    if (!classifierInputTensors || !classifierOutputTensors || inputCount != 1 || outputCount != 1) {
+        LOG_WARN("%s: Stage 2 requires one input and one output tensor\n", __func__);
+        larodClearError(&error);
+        return 0;
+    }
+
+    const larodTensorDims* inputDims = larodGetTensorDims(classifierInputTensors[0], &error);
+    const larodTensorDims* outputDims = larodGetTensorDims(classifierOutputTensors[0], &error);
+    if (!inputDims || !outputDims) {
+        LOG_WARN("%s: Failed to inspect stage 2 tensors: %s\n", __func__, error ? error->msg : "");
+        larodClearError(&error);
+        return 0;
+    }
+    classifierHeight = inputDims->dims[1];
+    classifierWidth = inputDims->dims[2];
+    classifierChannels = inputDims->dims[3];
+    classifierClasses = outputDims->dims[1];
+    if (classifierWidth == 0 || classifierHeight == 0 || classifierChannels != 3 || classifierClasses == 0) {
+        LOG_WARN("%s: Stage 2 must have NHWC RGB input and class-vector output\n", __func__);
+        return 0;
+    }
+
+    if (!labels_parse_file(CLASSIFIER_LABELS_PATH, &classifierLabels, &classifierLabelBuffer,
+                           &numClassifierLabels) || numClassifierLabels != classifierClasses) {
+        LOG_WARN("%s: %s must contain %u classifier labels\n", __func__,
+                 CLASSIFIER_LABELS_PATH, classifierClasses);
+        return 0;
+    }
+
+    const larodTensorPitches* inputPitches = larodGetTensorPitches(classifierInputTensors[0], &error);
+    const larodTensorPitches* outputPitches = larodGetTensorPitches(classifierOutputTensors[0], &error);
+    if (!inputPitches || !outputPitches) {
+        LOG_WARN("%s: Failed to inspect stage 2 tensor pitches: %s\n", __func__, error ? error->msg : "");
+        larodClearError(&error);
+        return 0;
+    }
+    classifierInputSize = inputPitches->pitches[0];
+    classifierOutputSize = outputPitches->pitches[0];
+    if (!createAndMapTmpFile(CLASSIFIER_INPUT_FILE_PATTERN, classifierInputSize,
+                             &classifierInputAddr, &classifierInputFd) ||
+        !createAndMapTmpFile(CLASSIFIER_OUTPUT_FILE_PATTERN, classifierOutputSize,
+                             &classifierOutputAddr, &classifierOutputFd)) {
+        LOG_WARN("%s: Could not allocate stage 2 buffers\n", __func__);
+        return 0;
+    }
+    if (!larodSetTensorFd(classifierInputTensors[0], classifierInputFd, &error) ||
+        !larodSetTensorFd(classifierOutputTensors[0], classifierOutputFd, &error)) {
+        LOG_WARN("%s: Failed setting stage 2 tensor fds: %s\n", __func__, error ? error->msg : "");
+        larodClearError(&error);
+        return 0;
+    }
+    classifierReq = larodCreateJobRequest(classifierModel, classifierInputTensors, 1,
+                                           classifierOutputTensors, 1, NULL, &error);
+    if (!classifierReq) {
+        LOG_WARN("%s: Failed creating stage 2 job: %s\n", __func__, error ? error->msg : "");
+        larodClearError(&error);
+        return 0;
+    }
+    if (!tflite_first_output_quant(CLASSIFIER_MODEL_PATH, &classifierQuant, &classifierZero)) {
+        classifierQuant = 1.0f / 255.0f;
+        classifierZero = 0.0f;
+        LOG_WARN("%s: Could not read stage 2 quantization; using uint8 defaults\n", __func__);
+    }
+    classifierReady = 1;
+    LOG("Stage 2 ready: %u classes at %ux%u\n", classifierClasses, classifierWidth, classifierHeight);
+    return 1;
+}
+
+static void
+classifier_fill_input(float nx, float ny, float nw, float nh) {
+    const uint8_t* source = (const uint8_t*)larodInputAddr;
+    uint8_t* destination = (uint8_t*)classifierInputAddr;
+    float centerX = (nx + nw * 0.5f) * modelWidth;
+    float centerY = (ny + nh * 0.5f) * modelHeight;
+    float side = fmaxf(nw * modelWidth, nh * modelHeight) * classifierCropMargin;
+    if (side < 2.0f) side = 2.0f;
+    float left = centerX - side * 0.5f;
+    float top = centerY - side * 0.5f;
+
+    for (unsigned int outputY = 0; outputY < classifierHeight; outputY++) {
+        float sourceY = top + (outputY + 0.5f) * side / classifierHeight - 0.5f;
+        int sourceY1 = (int)floorf(sourceY);
+        float yFraction = sourceY - sourceY1;
+        for (unsigned int outputX = 0; outputX < classifierWidth; outputX++) {
+            float sourceX = left + (outputX + 0.5f) * side / classifierWidth - 0.5f;
+            int sourceX1 = (int)floorf(sourceX);
+            float xFraction = sourceX - sourceX1;
+            uint8_t* output = destination + (outputY * classifierWidth + outputX) * 3;
+            for (unsigned int channel = 0; channel < 3; channel++) {
+                float value = 0.0f;
+                for (int dy = 0; dy < 2; dy++) {
+                    int y = sourceY1 + dy;
+                    for (int dx = 0; dx < 2; dx++) {
+                        int x = sourceX1 + dx;
+                        float sample = 0.0f;
+                        if (x >= 0 && x < (int)modelWidth && y >= 0 && y < (int)modelHeight)
+                            sample = source[(y * modelWidth + x) * 3 + channel];
+                        value += sample * (dx ? xFraction : 1.0f - xFraction) *
+                                 (dy ? yFraction : 1.0f - yFraction);
+                    }
+                }
+                output[channel] = (uint8_t)fminf(255.0f, fmaxf(0.0f, value));
+            }
+        }
+    }
+}
+
+static void
+classifier_classify_list(cJSON* list) {
+    if (!classifierReady || !list || larodInputAddr == MAP_FAILED)
+        return;
+
+    cJSON* detection = NULL;
+    cJSON_ArrayForEach(detection, list) {
+        cJSON* x = cJSON_GetObjectItem(detection, "x");
+        cJSON* y = cJSON_GetObjectItem(detection, "y");
+        cJSON* width = cJSON_GetObjectItem(detection, "w");
+        cJSON* height = cJSON_GetObjectItem(detection, "h");
+        cJSON* confidence = cJSON_GetObjectItem(detection, "c");
+        if (!x || !y || !width || !height)
+            continue;
+
+        classifier_fill_input((float)x->valuedouble, (float)y->valuedouble,
+                              (float)width->valuedouble, (float)height->valuedouble);
+        larodError* error = NULL;
+        if (!larodRunJob(conn, classifierReq, &error)) {
+            LOG_WARN("%s: Stage 2 inference failed: %s\n", __func__, error ? error->msg : "");
+            larodClearError(&error);
+            return;
+        }
+        const uint8_t* scores = (const uint8_t*)classifierOutputAddr;
+        unsigned int best = 0;
+        for (unsigned int index = 1; index < classifierClasses; index++) {
+            if (scores[index] > scores[best])
+                best = index;
+        }
+        if (confidence)
+            cJSON_AddNumberToObject(detection, "detector_c", confidence->valuedouble);
+        cJSON_DeleteItemFromObject(detection, "label");
+        cJSON_AddStringToObject(detection, "label", labels_get(classifierLabels, numClassifierLabels, best));
+        cJSON_DeleteItemFromObject(detection, "c");
+        cJSON_AddNumberToObject(detection, "c",
+                                ((float)scores[best] - classifierZero) * classifierQuant);
+    }
+}
+
 cJSON*
 Model_Inference(VdoBuffer* image) {
     larodError* error = NULL;
@@ -425,7 +622,9 @@ Model_Inference(VdoBuffer* image) {
     ACAP_STATUS_SetNull("model", "error");
     ACAP_STATUS_SetString("model", "status", "Running");
 
-    return non_maximum_suppression(list);
+    cJSON* finalList = non_maximum_suppression(list);
+    classifier_classify_list(finalList);
+    return finalList;
 }
 
 //The detection coordinates are in pixels relative to model input dimensions
@@ -739,7 +938,15 @@ unsigned char* Model_GetFullFrameJPEG(unsigned* jpeg_size) {
 }
 
 int Model_GetLabelIndex(const char* label) {
-    if (!label || !modelLabels || numLabels == 0)
+    if (!label)
+        return 0;
+    if (classifierReady && classifierLabels) {
+        for (size_t i = 0; i < numClassifierLabels; i++) {
+            if (classifierLabels[i] && strcmp(classifierLabels[i], label) == 0)
+                return (int)i;
+        }
+    }
+    if (!modelLabels || numLabels == 0)
         return 0;
     for (size_t i = 0; i < numLabels; i++) {
         if (modelLabels[i] && strcmp(modelLabels[i], label) == 0)
@@ -863,6 +1070,28 @@ Model_Cleanup() {
     larodError* error = NULL;
 
 	clear_crop_cache();
+
+    if (classifierReq) larodDestroyJobRequest(&classifierReq);
+    if (classifierInputTensors) larodDestroyTensors(conn, &classifierInputTensors, 1, &error);
+    if (classifierOutputTensors) larodDestroyTensors(conn, &classifierOutputTensors, 1, &error);
+    if (classifierModel) larodDestroyModel(&classifierModel);
+    if (classifierInputAddr != MAP_FAILED) munmap(classifierInputAddr, classifierInputSize);
+    if (classifierOutputAddr != MAP_FAILED) munmap(classifierOutputAddr, classifierOutputSize);
+    if (classifierInputFd >= 0) close(classifierInputFd);
+    if (classifierOutputFd >= 0) close(classifierOutputFd);
+    if (classifierModelFd >= 0) close(classifierModelFd);
+    classifierInputAddr = MAP_FAILED;
+    classifierOutputAddr = MAP_FAILED;
+    classifierInputFd = -1;
+    classifierOutputFd = -1;
+    classifierModelFd = -1;
+    classifierInputSize = 0;
+    classifierOutputSize = 0;
+    classifierReady = 0;
+    labels_free(classifierLabels, classifierLabelBuffer);
+    classifierLabels = NULL;
+    classifierLabelBuffer = NULL;
+    numClassifierLabels = 0;
 
 	// Free runtime-parsed labels
 	labels_free(modelLabels, labelBuffer);
@@ -988,6 +1217,9 @@ cJSON* Model_Setup(void) {
             chipString = chipOverride->valuestring;
             LOG("Chip overridden by settings: %s\n", chipString);
         }
+        cJSON* margin = cJSON_GetObjectItem(chipSettings, "classifierCropMargin");
+        if (margin && cJSON_IsNumber(margin) && margin->valuedouble > 0.0)
+            classifierCropMargin = (float)margin->valuedouble;
     }
 
     const larodDevice* device = larodGetDevice(conn, chipString, 0, &error);
@@ -1009,6 +1241,7 @@ cJSON* Model_Setup(void) {
         Model_Cleanup();
         return 0;
     }
+    classifier_setup(device);
 
     // Step 3: Introspect model tensors
     larodTensor** tempInputTensors = larodCreateModelInputs(InfModel, &inputs, &error);
@@ -1187,11 +1420,27 @@ cJSON* Model_Setup(void) {
     cJSON_AddBoolToObject(modelConfig, "customModel", strcmp(activeModelPath, CUSTOM_MODEL_PATH) == 0);
     cJSON_AddBoolToObject(modelConfig, "customLabels", strcmp(activeLabelsPath, CUSTOM_LABELS_PATH) == 0);
     cJSON_AddStringToObject(modelConfig, "chip", chipString);
+    cJSON_AddBoolToObject(modelConfig, "twoTier", classifierReady);
+    if (classifierReady) {
+        cJSON_AddStringToObject(modelConfig, "classifierPath", CLASSIFIER_MODEL_PATH);
+        cJSON_AddStringToObject(modelConfig, "classifierLabelsPath", CLASSIFIER_LABELS_PATH);
+        cJSON_AddNumberToObject(modelConfig, "classifierWidth", classifierWidth);
+        cJSON_AddNumberToObject(modelConfig, "classifierHeight", classifierHeight);
+        cJSON_AddNumberToObject(modelConfig, "classifierClasses", classifierClasses);
+    }
 
     // Add labels array
     cJSON* labelsArray = cJSON_CreateArray();
-    for (size_t i = 0; i < numLabels; i++) {
-        cJSON_AddItemToArray(labelsArray, cJSON_CreateString(modelLabels[i]));
+    if (classifierReady) {
+        cJSON* detectorLabels = cJSON_CreateArray();
+        for (size_t i = 0; i < numLabels; i++)
+            cJSON_AddItemToArray(detectorLabels, cJSON_CreateString(modelLabels[i]));
+        cJSON_AddItemToObject(modelConfig, "detectorLabels", detectorLabels);
+        for (size_t i = 0; i < numClassifierLabels; i++)
+            cJSON_AddItemToArray(labelsArray, cJSON_CreateString(classifierLabels[i]));
+    } else {
+        for (size_t i = 0; i < numLabels; i++)
+            cJSON_AddItemToArray(labelsArray, cJSON_CreateString(modelLabels[i]));
     }
     cJSON_AddItemToObject(modelConfig, "labels", labelsArray);
 

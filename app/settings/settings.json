@@ -3,6 +3,7 @@
   "chip": "",
   "confidence": 50,
   "nms": 0.45,
+  "classifierCropMargin": 1.25,
   "aoi": {
     "x1": 0,
     "y1": 0,

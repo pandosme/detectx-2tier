@@ -1,14 +1,15 @@
-# DetectX
+# DetectX 2-Tier
 
-Run custom-trained **YOLOv8** object-detection models directly on Axis cameras with
-ARTPEC-8 or ARTPEC-9 chipsets. Detections are published over MQTT, ONVIF events and
-HTTP for machine-to-machine use. The package ships a YOLOv8n COCO model at **640x384**
-as a working default; the intent is that you replace it with your own model.
+Run custom-trained **YOLOv8** detector and classifier models directly on Axis cameras
+with ARTPEC-8 or ARTPEC-9 chipsets. Stage 1 finds candidate objects in every frame;
+stage 2 classifies the post-NMS crops. Detections are published over MQTT, ONVIF events,
+HTTP, crop export, and SD training capture through the full DetectX feature set.
 
-DetectX is a **base to build on**: the application introspects whatever model you give
-it -- input resolution, class count, quantization -- so you change behaviour by changing
-the model, not the code. See [Train-Build.md](Train-Build.md) to train and
-export your own.
+DetectX 2-Tier is a **base to build on**: it introspects detector and classifier tensor
+shapes and quantization at startup, so models exported by
+[acap-model-pipeline](https://github.com/pandosme/acap-model-pipeline) need no source
+changes. The ACAP package identity remains `detectx`, so it replaces DetectX rather than
+coexisting on the same camera.
 
 ## Acknowledgements
 
@@ -52,7 +53,9 @@ one gives wrong detections.
 ./build.sh --target a8     # one chip only
 ```
 
-To use your own model, export it per chip and drop the files in before building:
+To build a package, supply both target-specific model tiers. The pipeline's exported
+classifier files must be renamed when copied because its detector and classifier both
+write `labels.txt`:
 
 ```bash
 ./export_yolov8.py --target a8 --weights your.pt --width 640 --height 384 \
@@ -60,27 +63,37 @@ To use your own model, export it per chip and drop the files in before building:
 ./export_yolov8.py --target a9 --weights your.pt --width 640 --height 384 \
     --calibration-dir /path/to/calibration/images --output app/model/model-a9.tflite
 cp your-labels.txt app/model/labels.txt
+cp a8-n-cls128.tflite app/model/classifier-a8.tflite
+cp a9-n-cls128.tflite app/model/classifier-a9.tflite
+cp classifier-labels.txt app/model/classifier-labels.txt
 ./build.sh
 ```
 
 Model parameters -- input size, tensor shapes, quantization scales -- are extracted
-from the TFLite files automatically at build time; nothing needs editing by hand.
+from the TFLite files automatically at build time; nothing needs editing by hand. Stage
+2 expects a uint8 RGB classifier with one uint8 output vector, such as the classifier
+exported by acap-model-pipeline. Its training crop margin must match
+`classifierCropMargin` in `app/settings/settings.json` (default `1.25`).
 
 
 ***
 
-# DetectX User & Integration Guide
+# DetectX 2-Tier User & Integration Guide
 
 ***
 
-## DetectX Model Overview
+## Model Overview
 
-DetectX is a versatile ACAP (Axis Camera Application Platform) for on-camera, real-time object detection, supporting various detection tasks depending on the bundled model.  
+DetectX 2-Tier is an ACAP for on-camera detection where the bundled model pair
+defines the task. Stage 1 detects candidate regions in every frame and stage 2
+assigns the final label to each surviving region.
 
-DetectX 5.x is **single-stage (1-tier) detection**: one YOLOv8 model per frame
-produces boxes and class labels directly.
+The packaged classifier labels are the labels used by events, MQTT, HTTP, crop
+export, and SD training capture. The stage-1 detector labels remain available as
+diagnostic model metadata.
 
-Below are model-specific details relevant to the generic "COCO" demo:
+The repository does not prescribe a default model pair. Use the matching detector
+and classifier exports from your dataset.
 
 | **Variant**    | **Dataset** | **Labels**                   | **ARTPEC-8** | **ARTPEC-9** |
 |----------------|-------------|------------------------------|------------------------|--------------------------|

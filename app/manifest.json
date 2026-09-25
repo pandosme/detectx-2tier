@@ -2,7 +2,7 @@
     "schemaVersion": "2.2.0",
     "acapPackageConf": {
         "setup": {
-            "friendlyName": "DetectX",
+            "friendlyName": "DetectX 2-Tier",
             "appName": "detectx",
             "vendor": "fred@juhlin.me",
             "vendorUrl": "https://pandosme.github.io",

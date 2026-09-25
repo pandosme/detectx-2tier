@@ -172,6 +172,9 @@
                                 <tr><td>Boxes / Classes</td><td id="info-shape">-</td></tr>
                                 <tr><td>Model Path</td><td id="info-path">-</td></tr>
                                 <tr><td>Labels Path</td><td id="info-labels-path">-</td></tr>
+                                <tr><td>Detection Mode</td><td id="info-detection-mode">-</td></tr>
+                                <tr><td>Classifier Input</td><td id="info-classifier-input">-</td></tr>
+                                <tr><td>Classifier Path</td><td id="info-classifier-path">-</td></tr>
                                 <tr><td>Chip</td><td id="info-chip">-</td></tr>
                                 <tr><td>Output Type</td><td id="info-output">-</td></tr>
                             </tbody>
@@ -309,15 +312,20 @@
         function renderModelInfo(info) {
             var isCustom = info.customModel;
             if (isCustom) {
-                $('#info-model-source').html('<span style="background:#dbeafe;color:#1d4ed8;padding:2px 10px;border-radius:999px;font-size:.85rem;font-weight:600">Custom Model</span>');
+                $('#info-model-source').html('<span style="background:#dbeafe;color:#1d4ed8;padding:2px 10px;border-radius:999px;font-size:.85rem;font-weight:600">Custom Detector</span>');
             } else {
-                $('#info-model-source').html('<span style="background:#d1fae5;color:#065f46;padding:2px 10px;border-radius:999px;font-size:.85rem;font-weight:600">Built-in COCO Model</span>');
+                $('#info-model-source').html('<span style="background:#d1fae5;color:#065f46;padding:2px 10px;border-radius:999px;font-size:.85rem;font-weight:600">Built-in Model Pair</span>');
             }
             $('#info-input').text((info.modelWidth || '?') + ' x ' + (info.modelHeight || '?'));
             $('#info-video').text((info.videoWidth || '?') + ' x ' + (info.videoHeight || '?'));
             $('#info-shape').text((info.boxes || '?') + ' / ' + (info.classes || '?'));
             $('#info-path').text(info.path || 'model/model.tflite');
             $('#info-labels-path').text(info.labelsPath || 'model/labels.txt');
+            $('#info-detection-mode').text(info.twoTier ? 'Two-tier detector + classifier' : 'Detector only');
+            $('#info-classifier-input').text(info.twoTier
+                ? (info.classifierWidth || '?') + ' x ' + (info.classifierHeight || '?')
+                : '-');
+            $('#info-classifier-path').text(info.classifierPath || '-');
             $('#info-chip').text(info.chip || '-');
             $('#info-output').text(info.outputFloat ? 'float32' : 'quantized');
             $('#model-description').val(info.description || '');
@@ -352,6 +360,10 @@
                             classes: appData.model.classes,
                             path: appData.model.path,
                             labelsPath: appData.model.labelsPath,
+                            twoTier: appData.model.twoTier,
+                            classifierWidth: appData.model.classifierWidth,
+                            classifierHeight: appData.model.classifierHeight,
+                            classifierPath: appData.model.classifierPath,
                             chip: appData.model.chip,
                             outputFloat: appData.model.outputFloat,
                             labels: appData.model.labels,
