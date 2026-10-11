@@ -125,8 +125,15 @@ int save_jpeg_to_file(const char* path, const unsigned char* jpeg, unsigned size
         return 0;
     }
     size_t written = fwrite(jpeg, 1, size, f);
-    fclose(f);
-    return (written == size) ? 1 : 0;
+    int write_err = (written != size) ? errno : 0;
+    if (fclose(f) != 0 && !write_err)
+        write_err = errno;
+    if (write_err) {
+        syslog(LOG_WARNING, "Failed to write JPEG %s (%zu/%u bytes): %s\n", path, written, size, strerror(write_err));
+        remove(path);
+        return 0;
+    }
+    return 1;
 }
 
 /**

@@ -38,7 +38,7 @@ def parse_args():
     parser.add_argument("--weights", required=True, help="Ultralytics checkpoint")
     parser.add_argument("--calibration-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--labels", type=Path, default=Path("app/model/labels.txt"))
+    parser.add_argument("--labels", type=Path, default=Path("app/model/tier1-labels.txt"))
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=736)
     parser.add_argument("--calibration-images", type=int, default=128)
@@ -174,7 +174,7 @@ def main():
     args = parse_args()
     if args.width % 32 or args.height % 32:
         raise ValueError("Model width and height must both be multiples of 32.")
-    output = args.output or Path(f"app/model/model-{args.target}.tflite")
+    output = args.output or Path(f"app/model/{args.target}-tier1.tflite")
 
     images = calibration_images(args.calibration_dir, args.calibration_images)
     print(f"Exporting {args.weights} at {args.width}x{args.height} using {len(images)} calibration images")

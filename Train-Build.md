@@ -181,7 +181,7 @@ python export_yolov8.py \
   --calibration-dir /path/to/calibration/images \
   --calibration-images 300 \
   --width 1280 --height 736 \
-  --output app/model/model-a8.tflite
+  --output app/model/a8-tier1.tflite
 
 python export_yolov8.py \
   --target a9 \
@@ -189,7 +189,7 @@ python export_yolov8.py \
   --calibration-dir /path/to/calibration/images \
   --calibration-images 300 \
   --width 1280 --height 736 \
-  --output app/model/model-a9.tflite
+  --output app/model/a9-tier1.tflite
 ```
 
 It exports to ONNX, cuts the graph at the final two-input `Concat` (telling
@@ -257,7 +257,7 @@ Two things keep it manageable:
 Replace the model and labels, then build:
 
 ```bash
-cp my_labels.txt app/model/labels.txt     # one label per line, in class order
+cp my_labels.txt app/model/tier1-labels.txt     # one label per line, in class order
 ./build.sh
 ```
 

@@ -59,13 +59,13 @@ write `labels.txt`:
 
 ```bash
 ./export_yolov8.py --target a8 --weights your.pt --width 640 --height 384 \
-    --calibration-dir /path/to/calibration/images --output app/model/model-a8.tflite
+    --calibration-dir /path/to/calibration/images --output app/model/a8-tier1.tflite
 ./export_yolov8.py --target a9 --weights your.pt --width 640 --height 384 \
-    --calibration-dir /path/to/calibration/images --output app/model/model-a9.tflite
-cp your-labels.txt app/model/labels.txt
-cp a8-n-cls128.tflite app/model/classifier-a8.tflite
-cp a9-n-cls128.tflite app/model/classifier-a9.tflite
-cp classifier-labels.txt app/model/classifier-labels.txt
+    --calibration-dir /path/to/calibration/images --output app/model/a9-tier1.tflite
+cp your-labels.txt app/model/tier1-labels.txt
+cp a8-n-cls128.tflite app/model/a8-tier2.tflite
+cp a9-n-cls128.tflite app/model/a9-tier2.tflite
+cp classifier-labels.txt app/model/tier2-labels.txt
 ./build.sh
 ```
 
@@ -392,6 +392,29 @@ DetectX delivers three primary payload types, all enrichable with the configured
 ***
 
 ## Version History
+
+## 5.4.0
+
+- **Event trigger by time-based vote** ("Prioritize"), with a new **Balanced** option.
+  Speed fires on the first frame. Balanced fires when a label is in >= 75 % of the frames
+  with detections within 300 ms; Accuracy when it is in >= 3 frames and >= 60 % within
+  500 ms. Both also require that no other label was seen more often, so brief
+  misclassifications (or the shapes a hand passes through while raised) do not fire.
+  The window stretches on slow cameras. Settings `eventLogic` `{window, frames, share}`
+  overrides. Replaces the frame-count window, which read a wrong status key and always
+  used 16 frames.
+- **No hidden minimum-size filter.** Its UI was removed in 4.0.0, but a 20/1000 default
+  kept dropping small, distant objects.
+- **Full-resolution crop export** like DetectX 5.1: the second stream also runs when crop
+  export has "Crop from Full Camera Resolution" on, not only for stage 2; capped to the
+  active capture mode. Crop payload adds `frame_w`/`frame_h`; crops only cut when the
+  throttle lets one out.
+- **Leaner payload:** `detector_c` (percent) always; `classifier_label`, `classifier_c` and
+  `classifier_fallback` only when the classifier threshold replaced the label.
+- A failed inference no longer crashes the application into a restart loop.
+- Bundled models: Hands v4 960x544 (tier 1) and gesture15 YOLOv8s-cls 128 (tier 2), as in
+  HandGesture 5.0.0.
+- 5.3.0 (included): generic classifier threshold with a user-set fallback label.
 
 ## 5.0.0
 

@@ -30,8 +30,8 @@ for size in $SIZES; do
 	$PY export_yolov8.py --target "$TARGET" --weights "$WEIGHTS" \
 		--width "$w" --height "$h" \
 		--calibration-dir "$CALIB" --calibration-images 128 \
-		--labels app/model/labels.txt \
-		--output "$OUT/model-${TARGET}-${w}x${h}.tflite"
+		--labels app/model/tier1-labels.txt \
+		--output "$OUT/${TARGET}-tier1-${w}x${h}.tflite"
 done
 echo
 echo "Exported to $OUT/ :"

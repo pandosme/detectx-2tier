@@ -22,14 +22,14 @@ python export_yolov8.py \
   --weights models/detector_yolov8n_coco.pt \
   --calibration-dir /path/to/calibration/images \
   --width 640 --height 384 \
-  --output app/model/model-a8.tflite
+  --output app/model/a8-tier1.tflite
 
 python export_yolov8.py \
   --target a9 \
   --weights models/detector_yolov8n_coco.pt \
   --calibration-dir /path/to/calibration/images \
   --width 640 --height 384 \
-  --output app/model/model-a9.tflite
+  --output app/model/a9-tier1.tflite
 ```
 
 ARTPEC-8 exports use per-tensor quantization; ARTPEC-9 exports use per-channel quantization. The `--target` option selects the correct mode. Build packages only after exporting both files:

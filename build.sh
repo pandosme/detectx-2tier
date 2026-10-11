@@ -47,7 +47,7 @@ case "$TARGET" in
 esac
 
 for target in $TARGETS; do
-	for model in "app/model/model-${target}.tflite" "app/model/classifier-${target}.tflite"; do
+	for model in "app/model/${target}-tier1.tflite" "app/model/${target}-tier2.tflite" app/model/tier1-labels.txt app/model/tier2-labels.txt; do
 		if [ ! -f "$model" ]; then
 			echo "Missing $model" >&2
 			echo "Provide the chip-specific TFLite model before building target $target." >&2

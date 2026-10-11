@@ -101,12 +101,12 @@ Also links statically: `libjpeg`, `libturbojpeg` (in `app/lib/`)
 - ACAP package metadata: name, version, vendor
 - HTTP endpoint definitions (FastCGI nodes: app, settings, status, device, model, mqtt, certs, crops)
 
-**app/model/model-a8.tflite** / **app/model/model-a9.tflite**
+**app/model/a8-tier1.tflite** / **app/model/a9-tier1.tflite**
 - Chip-specific uint8 TFLite models with split coordinate and score outputs
 - ARTPEC-8 uses per-tensor quantization; ARTPEC-9 uses per-channel quantization
 - The Docker build stages the selected variant as `model/model.tflite`
 
-**app/model/labels.txt**
+**app/model/tier1-labels.txt**
 - Text file with one label per line
 - Loaded at runtime by labelparse.c
 - Order must match model output classes
@@ -160,7 +160,7 @@ Follow the YOLOv8 training process documented in [Train-Build.md](Train-Build.md
 
 1. Train a YOLOv8 model with dimensions that are multiples of 32
 2. Export target-specific TFLite variants with `export_yolov8.py --target a8` and `--target a9`
-3. Replace `app/model/model-a8.tflite`, `app/model/model-a9.tflite`, and `app/model/labels.txt`
+3. Replace `app/model/a8-tier1.tflite`, `app/model/a9-tier1.tflite`, and `app/model/tier1-labels.txt`
 4. Run `./build.sh` - model parameters are validated and extracted during build
 
 ### Customizing Detection Output
