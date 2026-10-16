@@ -1,10 +1,11 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for coding agents working in this repository (DetectX 2-Tier 5.1.0). Read it
+before changing code, then the files that own the behaviour you change.
 
 ## Project Overview
 
-DetectX is an ACAP (Axis Camera Application Platform) application that runs custom YOLOv8 object detection models directly on Axis network cameras with ARTPEC-8 and ARTPEC-9 chipsets. The application performs real-time inference on-camera and exports detections via MQTT, ONVIF, and HTTP.
+DetectX 2-Tier is an ACAP (Axis Camera Application Platform) application that runs a YOLOv8 detector on every frame and a YOLOv8 classifier on each detected box, directly on Axis network cameras with ARTPEC-8 and ARTPEC-9 chipsets. The application performs real-time inference on-camera and exports detections via MQTT, ONVIF, and HTTP.
 
 This is a native C application that integrates with:
 - Axis ACAP SDK (version 12.x, native SDK)
@@ -101,15 +102,13 @@ Also links statically: `libjpeg`, `libturbojpeg` (in `app/lib/`)
 - ACAP package metadata: name, version, vendor
 - HTTP endpoint definitions (FastCGI nodes: app, settings, status, device, model, mqtt, certs, crops)
 
-**app/model/a8-tier1.tflite** / **app/model/a9-tier1.tflite**
-- Chip-specific uint8 TFLite models with split coordinate and score outputs
-- ARTPEC-8 uses per-tensor quantization; ARTPEC-9 uses per-channel quantization
-- The Docker build stages the selected variant as `model/model.tflite`
-
-**app/model/tier1-labels.txt**
-- Text file with one label per line
-- Loaded at runtime by labelparse.c
-- Order must match model output classes
+**app/model/** -- the bundled models only (see `docs/MODEL_CONTRACT.md`, `app/model/SOURCE.md`)
+- `model-a8.tflite` / `model-a9.tflite`: stage-1 detectors, uint8, split coordinate and score outputs
+- `classifier-a8.tflite` / `classifier-a9.tflite`: stage-2 classifiers, uint8 `[1,S,S,3]` -> `[1,classes]`
+- `labels.txt` (detector), `classifier-labels.txt` (classifier), one label per line in output order
+- ARTPEC-8 needs per-tensor quantization, ARTPEC-9 per-channel; the Docker build stages the
+  selected chip's files as `model/model.tflite` and `model/classifier.tflite` and validates
+  both with `app/extract_model_params.py`
 
 **app/settings/settings.json**
 - Detection parameters: confidence threshold, AOI (area of interest), minimum size
@@ -154,14 +153,14 @@ Backend endpoints (FastCGI) are handled in ACAP.c callback functions that return
 
 ## Model Training and Customization
 
-### Training Your Own Model
+### Replacing the models
 
-Follow the YOLOv8 training process documented in [Train-Build.md](Train-Build.md):
-
-1. Train a YOLOv8 model with dimensions that are multiples of 32
-2. Export target-specific TFLite variants with `export_yolov8.py --target a8` and `--target a9`
-3. Replace `app/model/a8-tier1.tflite`, `app/model/a9-tier1.tflite`, and `app/model/tier1-labels.txt`
-4. Run `./build.sh` - model parameters are validated and extracted during build
+This repository holds the application only; training and export live in
+[acap-model-pipeline](https://github.com/pandosme/acap-model-pipeline), which writes a
+model package. `tools/install-model.sh <package> --size WxH` checks both models against
+the contract and copies them into `app/model/`; then `./build.sh`. Keep training scripts,
+datasets and checkpoints out of this repository. The classifier's training crop margin
+must match `classifierCropMargin` in `app/settings/settings.json`.
 
 ### Customizing Detection Output
 
@@ -203,7 +202,7 @@ Key functions to modify:
 ## Platform-Specific Notes
 
 **ARTPEC-8 vs ARTPEC-9:**
-- Model input size affects inference time significantly (see performance table in Train-Build.md)
+- Model input size affects inference time significantly (see the README's performance table)
 - ARTPEC-9 supports larger models and faster inference
 - Choose model size (nano/small/medium) based on target platform
 
@@ -226,10 +225,8 @@ Check broker connectivity from "MQTT" page in web UI. Verify firewall rules and 
 **Memory leaks:**
 Recent fixes (3.5.3) addressed memory leaks in crop caching and video buffer handling. Always call `Model_Reset()` after processing detections.
 
-## Recent Changes
+## Tools
 
-Version 3.5.3 (Nov 29, 2025): Fixed memory leak
-Version 3.5.2 (Aug 29, 2025): Fixed black-box video issue
-Version 3.5.1 (Aug 29, 2025): Added Detection Export feature, MQTT improvements
-
-See [README.md](README.md) for complete changelog.
+`tools/install-model.sh`, `tools/check-model.sh` (model contract check in the build's
+Docker image), `tools/camera.sh` (install, start/stop, status, log, upload-model),
+`tools/benchmark_*.sh`. See `docs/BUILDING.md`. The changelog is in the README.

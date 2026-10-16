@@ -19,6 +19,8 @@ def parse_args():
     parser.add_argument("model", type=Path)
     parser.add_argument("--target", required=True, choices=("a8", "a9"))
     parser.add_argument("--output", type=Path, default=Path("model_params.h"))
+    parser.add_argument("--classifier", type=Path,
+                        help="stage-2 classifier to validate (labels: classifier-labels.txt next to it)")
     return parser.parse_args()
 
 def label_count(path):
@@ -98,6 +100,30 @@ def validate_detector(model_path, labels_path, target):
     validate_quantization(interpreter, model_path, target)
     return input_detail, coord, score
 
+def validate_classifier(model_path, labels_path, target):
+    interpreter = load_interpreter(model_path)
+    inputs = interpreter.get_input_details()
+    outputs = interpreter.get_output_details()
+    if len(inputs) != 1 or len(outputs) != 1:
+        raise ValueError(f"Classifier has {len(inputs)} inputs and {len(outputs)} outputs, expected 1 and 1")
+    inp, out = inputs[0], outputs[0]
+    shape = tuple(int(v) for v in inp["shape"])
+    if len(shape) != 4 or shape[0] != 1 or shape[3] != 3 or shape[1] != shape[2]:
+        raise ValueError(f"Classifier input must be [1,S,S,3], got {list(shape)}")
+    if inp["dtype"] != np.uint8 or out["dtype"] != np.uint8:
+        raise ValueError(f"Classifier input and output must be uint8, got {inp['dtype']} / {out['dtype']}")
+    require_quantization(inp, "Classifier input")
+    require_quantization(out, "Classifier output")
+    out_shape = [int(v) for v in out["shape"]]
+    if len(out_shape) != 2 or out_shape[0] != 1:
+        raise ValueError(f"Classifier output must be [1,classes], got {out_shape}")
+    labels = label_count(labels_path)
+    if out_shape[1] != labels:
+        raise ValueError(f"Classifier has {out_shape[1]} classes but {labels_path} has {labels} labels")
+    validate_quantization(interpreter, model_path, target)
+    print(f"  - Classifier: {shape[2]}x{shape[1]}x3 uint8 -> [1, {out_shape[1]}] uint8 ({labels} labels)")
+
+
 def main():
     args = parse_args()
     model_path = args.model
@@ -121,11 +147,14 @@ def main():
         output.write(f"#define SCORE_QUANTIZATION_ZERO_POINT {score_zero}\n\n")
         output.write("#endif // MODEL_PARAMS_H\n")
 
+    if args.classifier:
+        validate_classifier(args.classifier, args.classifier.parent / "classifier-labels.txt", args.target)
+
     print(f"Model parameters extracted to {args.output}")
     print(f"  - Input:  {input_detail['shape'][2]}x{input_detail['shape'][1]}"
           f"x{input_detail['shape'][3]} {input_detail['dtype'].__name__}")
-    print(f"  - Coords: {list(coord['shape'])} scale={coord_scale:.9g} zero={coord_zero}")
-    print(f"  - Scores: {list(score['shape'])} scale={score_scale:.9g} zero={score_zero}"
+    print(f"  - Coords: {[int(v) for v in coord['shape']]} scale={coord_scale:.9g} zero={coord_zero}")
+    print(f"  - Scores: {[int(v) for v in score['shape']]} scale={score_scale:.9g} zero={score_zero}"
           f"  ({score['shape'][1]} classes, {score['shape'][2]} boxes)")
 
 if __name__ == "__main__":

@@ -1,15 +1,20 @@
 # DetectX 2-Tier
 
-Run custom-trained **YOLOv8** detector and classifier models directly on Axis cameras
-with ARTPEC-8 or ARTPEC-9 chipsets. Stage 1 finds candidate objects in every frame;
-stage 2 classifies the post-NMS crops. Detections are published over MQTT, ONVIF events,
-HTTP, crop export, and SD training capture through the full DetectX feature set.
+Run a **two-stage YOLOv8 model** on Axis cameras with ARTPEC-8 or ARTPEC-9: stage 1
+finds objects in every frame, stage 2 classifies each object from a full-resolution
+crop. Results go out over MQTT, ONVIF events, HTTP, crop export and SD training capture,
+with the full DetectX feature set.
 
-DetectX 2-Tier is a **base to build on**: it introspects detector and classifier tensor
-shapes and quantization at startup, so models exported by
-[acap-model-pipeline](https://github.com/pandosme/acap-model-pipeline) need no source
-changes. The ACAP package identity remains `detectx`, so it replaces DetectX rather than
-coexisting on the same camera.
+The package ships **HandGesture's model** as a working default: a hand detector and a
+15-gesture classifier trained on the [HaGRID](https://github.com/hukenovs/hagrid) dataset
+plus real camera footage. DetectX 2-Tier is meant as a **base for your own two-tier
+models**: it reads input sizes, class counts and quantization from the model files, so a
+pair you train and export with
+[acap-model-pipeline](https://github.com/pandosme/acap-model-pipeline) needs no code
+changes.
+
+The package identity is `detectx`, the same as DetectX: it replaces DetectX on a camera
+rather than running next to it.
 
 ## Acknowledgements
 
@@ -17,30 +22,95 @@ Thanks to [Pavel Kotyza](https://github.com/kotyzap) for his work enabling
 YOLOv8 models on Axis cameras through
 [YOLOv8-on-AXIS-ACAP](https://github.com/kotyzap/YOLOv8-on-AXIS-ACAP).
 
-> **DetectX 5.x runs YOLOv8. It does not run YOLOv5.** The output layout is different
-> (anchor-free, two tensors, no objectness), so a 4.x model will not load here. The
-> YOLOv5 line is frozen at 4.1.1 and is no longer maintained.
->
 > **ARTPEC-9 requires Axis OS 13 or later.** Earlier firmware miscomputes YOLOv8 on the
 > A9 DLPU -- the model loads and runs at full speed but returns high-confidence garbage,
 > while the same package is correct on ARTPEC-8.
+
+### Choose your path
+
+| You want to... | Do this | You need |
+|---|---|---|
+| Try two-tier detection with the hand-gesture model | Install a package from [Releases](https://github.com/pandosme/detectx-2tier/releases) | an Axis camera |
+| Ship a package with your own model pair | `tools/install-model.sh` then `./build.sh` -- see [docs/BUILDING.md](docs/BUILDING.md) | Docker |
+| Train your own two-tier model | [Train your own two-tier model](#train-your-own-two-tier-model) below, with acap-model-pipeline | a GPU is recommended |
+| Run a single-stage model | Use [DetectX](https://github.com/pandosme/DetectX) | -- |
+| Use hand gestures as a finished product | Use [HandGesture](https://github.com/pandosme/HandGesture) (selectable detection range, gesture events, user documentation) | an Axis camera |
+
+This repository holds the application only. Training, datasets and export live in
+acap-model-pipeline; the two meet at the [model contract](docs/MODEL_CONTRACT.md).
+
+## One tier or two?
+
+**DetectX (one tier)** runs one detector whose classes are the answer. **DetectX 2-Tier**
+runs a detector that only has to *find* the object, then a classifier that decides *what
+it is* from a crop of the camera's full-resolution image.
+
+| Use DetectX (one tier) when... | Use DetectX 2-Tier when... |
+|---|---|
+| the classes look different at the size the detector sees them (person, car, bicycle, bird, a dumped object) | the classes differ in small details of the object (hand gestures, vehicle make, PPE worn or not, species) |
+| objects are large in the image, or near | objects are small or far, but the detail is still visible at full resolution |
+| many objects per frame (the classifier runs once per object) | few objects per frame |
+| you want one model to train and maintain | you can train two models and keep their data apart |
+
+The difference is pixels. A detector at 1120x640 sees a 4K scene at about a quarter of
+its resolution; a hand 40 px wide in 4K is 10-12 px at the detector, too few to read a
+gesture. The two-tier classifier reads the same hand from the 4K image. Measured on 435
+held-out real hands from our cameras (share with the right gesture, same detector input
+1120x640):
+
+| | full image | View Area 1446 px wide |
+|---|---|---|
+| One tier: 15-gesture YOLOv8n trained on HaGRID + camera data | 0.66 | 0.85 |
+| **Two tier: hand detector + gesture classifier (this default model)** | **0.85** | **0.92** |
+
+The gap is largest for small hands (36-60 px in 4K: 0.61 vs 0.87). A View Area narrows
+it because it gives every object more pixels -- see *Range* below.
+
+The price of two tiers: two models to train, and the classifier runs once per detected
+object (13-20 ms each on ARTPEC-8), so many objects lower the frame rate.
+
+## The default model: hand gestures
+
+| | ARTPEC-8 | ARTPEC-9 |
+|---|---|---|
+| Stage 1: hand detector (YOLOv8n, 1 class `hand`) | Hands v4 at **960x544** | Hands v5 at **1280x736** |
+| Stage 2: gesture classifier (YOLOv8s-cls) | gesture15, 128x128 | gesture15, 128x128 |
+| Frame rate, no hand / one hand | ~10 / 8.6 FPS | ~8 / 7 FPS |
+
+Gestures (classifier labels): call, dislike, fist, four, like, middle_finger, mute,
+no_gesture, ok, one, palm, peace, rock, stop, three.
+
+- **Hand detector:** trained on ~1,900 verified frames from five Axis cameras (indoor and
+  outdoor, day and night), HaGRID images with every hand labelled, and person-free frames.
+  Hands v5 is a fine-tune of v4 at the larger input; it finds 93 % of the test hands
+  against 88 % for v4, most of the gain on hands 32-64 px wide in a 4K image.
+- **Gesture classifier:** HaGRID gesture crops (6,000 per class) plus ~1,900 verified real
+  hands cut the way the app cuts them, with shifted and resized boxes to mimic the
+  detector's box errors, and false hand detections (elbows, plants) as `no_gesture`.
+  93-96 % right on held-out real hands; weakest are `fist` (read as `one`) and `three`
+  (read as `peace`).
+- **Default settings** for this model: detector confidence 40, NMS 0.2, classifier
+  threshold 60 % with fallback `no_gesture`, and `no_gesture` unticked so idle hands do not
+  fire events. If you install your own models, review these in
+  `app/settings/settings.json`.
+- Trained on one person and two cameras; expect lower accuracy for other people and
+  viewpoints. [HandGesture](https://github.com/pandosme/HandGesture) documents range and
+  performance for the same models in detail.
 
 ## Quick Start
 
 ### Downloading a Pre-Compiled Package
 
-Pre-compiled `.eap` packages are published by GitHub Actions. Download the latest pre-compiled package here:
-
-Two packages are published, one per chipset -- they are **not** interchangeable:
+Two packages are published per release, one per chipset -- they are **not**
+interchangeable:
 
 | Package | Chip |
 |---|---|
-| `DetectX_<version>_artpec8.eap` | ARTPEC-8 |
-| `DetectX_<version>_artpec9.eap` | ARTPEC-9 |
+| `DetectX_2-Tier_<version>_artpec8.eap` | ARTPEC-8 |
+| `DetectX_2-Tier_<version>_artpec9.eap` | ARTPEC-9 |
 
-Open the repository's **Releases** page and download the one matching your camera's
-chipset. ARTPEC-8 is quantized per-tensor; ARTPEC-9 per-channel. Installing the wrong
-one gives wrong detections.
+ARTPEC-8 models are quantized per-tensor, ARTPEC-9 per-channel; the wrong package gives
+wrong detections.
 
 > **Axis OS 13 development installs:** To run an unsigned ACAP, first install the
 > [Dev-Mode ACAP](https://www.axis.com/es-es/for-developers/news/acap-developer-mode).
@@ -53,137 +123,119 @@ one gives wrong detections.
 ./build.sh --target a8     # one chip only
 ```
 
-To build a package, supply both target-specific model tiers. The pipeline's exported
-classifier files must be renamed when copied because its detector and classifier both
-write `labels.txt`:
+To build with your own model pair, install it first:
 
 ```bash
-./export_yolov8.py --target a8 --weights your.pt --width 640 --height 384 \
-    --calibration-dir /path/to/calibration/images --output app/model/a8-tier1.tflite
-./export_yolov8.py --target a9 --weights your.pt --width 640 --height 384 \
-    --calibration-dir /path/to/calibration/images --output app/model/a9-tier1.tflite
-cp your-labels.txt app/model/tier1-labels.txt
-cp a8-n-cls128.tflite app/model/a8-tier2.tflite
-cp a9-n-cls128.tflite app/model/a9-tier2.tflite
-cp classifier-labels.txt app/model/tier2-labels.txt
+tools/install-model.sh <two-tier-model-package> --size 960x544
 ./build.sh
 ```
 
-Model parameters -- input size, tensor shapes, quantization scales -- are extracted
-from the TFLite files automatically at build time; nothing needs editing by hand. Stage
-2 expects a uint8 RGB classifier with one uint8 output vector, such as the classifier
-exported by acap-model-pipeline. Its training crop margin must match
-`classifierCropMargin` in `app/settings/settings.json` (default `1.25`).
+The installer checks each chip's detector and classifier against the
+[model contract](docs/MODEL_CONTRACT.md) and copies them to `app/model/`. See
+[docs/BUILDING.md](docs/BUILDING.md) for details and the command-line camera tools
+(`tools/camera.sh`: install, status, log, restart).
 
+## Train your own two-tier model
 
-***
+[acap-model-pipeline](https://github.com/pandosme/acap-model-pipeline) trains and exports
+both stages and writes a model package this app installs. You need:
 
-# DetectX 2-Tier User & Integration Guide
+1. **A detector dataset** in YOLO format with **one broad class** (e.g. `hand`, `vehicle`,
+   `person`): every instance labelled, plus frames without the object.
+2. **Class labels for the classifier**: either per-box labels in the same dataset (the
+   pipeline crops them) or a folder of crops per class. Include a **rejection class**
+   (e.g. `no_gesture`, `other`) for boxes that are none of the real classes.
+3. **Calibration frames** from the camera you deploy on, at the export size.
 
-***
+A two-tier config (`config/mymodel.yaml` in acap-model-pipeline):
 
-## Model Overview
+```yaml
+name: mymodel
+models_dir: ~/datasets/mymodel/models      # the model package
+acap: ~/acap/detectx-2tier                 # where `install` puts it
+crops:                                     # stage-2 dataset, cut like the app cuts
+  reader: yolo_txt
+  source_images: ~/datasets/mymodel/images
+  source_annotations: ~/datasets/mymodel/labels
+  out: ~/datasets/mymodel-crops
+  size: 128
+  margin: 1.25                             # = classifierCropMargin in settings.json
+  classes: [class_a, class_b, other]       # keep the rejection class
+detector:
+  base_weights: yolov8n.pt
+  data: ~/datasets/mymodel-detector/data.yaml    # one class
+  calib: ~/datasets/mymodel/calib
+  imgsz: 960
+  export_ladder: [960x544, 1280x736]
+classifier:
+  base_weights: yolov8s-cls.pt
+  calib: ~/datasets/mymodel-crops/val
+  imgsz: 128
+  hyp: {flipud: 0.0}
+```
 
-DetectX 2-Tier is an ACAP for on-camera detection where the bundled model pair
-defines the task. Stage 1 detects candidate regions in every frame and stage 2
-assigns the final label to each surviving region.
+```bash
+tools/get_base_weights.sh n s                          # COCO starting weights
+python pipeline.py all -c config/mymodel.yaml          # crops -> train both -> export both
+python pipeline.py install -c config/mymodel.yaml --resolution 960x544
+cd ~/acap/detectx-2tier && ./build.sh
+```
 
-The packaged classifier labels are the labels used by events, MQTT, HTTP, crop
-export, and SD training capture. The stage-1 detector labels remain available as
-diagnostic model metadata.
+`python pipeline.py <dataset-folder>` runs the same steps as a guided, resumable workflow.
 
-The repository does not prescribe a default model pair. Use the matching detector
-and classifier exports from your dataset.
+**The worked example is the default model.** The gesture crops were built from HaGRID's
+annotations (the pipeline's `hagrid_json` reader, `config/hagrid.yaml`), the hand detector
+from HaGRID plus camera frames (`config/hands-960.yaml`, `config/hands-1280.yaml`), and the
+classifier from the HaGRID crops plus verified camera crops (`config/handgesture2.yaml`).
 
-| **Variant**    | **Dataset** | **Labels**                   | **ARTPEC-8** | **ARTPEC-9** |
-|----------------|-------------|------------------------------|------------------------|--------------------------|
-| DetectX COCO   | COCO        | person, bicycle, car, motorcycle, airplane, bus, train, truck, boat, traffic light, fire hydrant, stop sign, parking meter, bench, bird, cat, dog, horse, sheep, cow, elephant, bear, zebra, giraffe, backpack, umbrella, handbag, tie, suitcase, frisbee, skis, snowboard, sports ball, kite, baseball bat, baseball glove, skateboard, surfboard, tennis racket, bottle, wine glass, cup, fork, knife, spoon, bowl, banana, apple, sandwich, orange, broccoli, carrot, hot dog, pizza, donut, cake, chair, couch, potted plant, bed, dining table, toilet, TV, laptop, mouse, remote, keyboard, cell phone, microwave, oven, toaster, sink, refrigerator, book, clock, vase, scissors, teddy bear, hair drier, toothbrush | YOLOv8n @ **640x384**<br>~50  ms / 20 fps | YOLOv8n @ **640x384**<br>(measured on OS 13) |
+## Best practices
 
-*Note: ARTPEC-8 and ARTPEC-9 are Axis camera chipset platforms, with ARTPEC-9 offering enhanced performance and the ability to process larger images for improved detection quality.*
+What made the difference while building the default model, roughly in order of impact:
 
-The default input is **640x384** -- a 16:9 shape, not square. A square input on a 16:9
-scene wastes about 44% of its pixels on padding. 640x384 runs at ~20 fps on ARTPEC-8 and
-covers the full scene; it is a deliberately fast, general-purpose starting point. When to
-raise it, and what it costs, is covered in **Choosing a configuration** below. Both
-dimensions must be multiples of 32.
+**Data**
+- **Real camera data beats more internet data.** HaGRID alone gave a detector that missed
+  distant hands and a classifier that confused gestures at camera sizes. A few thousand
+  verified frames and crops from the deploying cameras fixed most of it.
+- **Capture with the app itself.** Run DetectX with a first detector and export crops over
+  MQTT at full camera resolution, with a generous border; review them in a labelling tool.
+  Auto-label with your previous model and only verify.
+- **Label every instance**, including idle or "background" ones (a relaxed hand is
+  `no_gesture`, not unlabelled). An unlabelled object teaches the detector to ignore it.
+- **Add empty frames**, day and night, from every camera -- including look-alikes (a tarp,
+  fence slats, a lamp's glare). They are the cheapest way to remove false detections.
+- **Hold out by time, not by image.** Frames seconds apart are near-duplicates; split in
+  10-second blocks (or whole sessions) so the test set measures something.
 
-***
+**Detector**
+- **Train at the deployment input size.** Our hand detector trained at 1920 and run at 960
+  found 83 % of hands; trained at 960 it found 89 %. The detector learns object sizes in
+  pixels.
+- **Use 16:9 inputs** (960x544, 1120x640, 1280x736); a square input wastes a third of the
+  pixels on a 16:9 camera.
+- **Range comes from pixels, not model size.** Raise the input size or use a **View Area**
+  before using a bigger model. A View Area half the sensor width doubles every object's
+  pixels at the same frame rate.
+- **Multi-class detectors need a logit clamp** for ARTPEC-9; the pipeline adds it.
 
-## Choosing a configuration: speed, quality and distance
+**Classifier**
+- **Crop exactly like the app**: square, longest box side x 1.25, from the full-resolution
+  image. Then add shifted and resized copies of each real crop so the classifier tolerates
+  the detector's int8 box errors (box coordinates step ~15 px on a 4K image).
+- **Train on small crops too**: degrade a share of the training crops to 16-96 px first.
+- **Keep a rejection class** and feed it the detector's false positives.
+- **Turn vertical flip off** for orientation-sensitive classes (like vs dislike).
 
-Detection is governed by three levers, and they trade against each other. There is no
-single best setting -- the right one depends on how far away your objects are and how
-fast you need answers.
-
-1. **Input resolution** -- the single biggest lever. It sets both latency and how far
-   away an object can still be detected. Baked into the model at export time.
-2. **Model size** (n / s / m) -- more capacity means better accuracy on hard or small
-   objects, at a proportional cost in latency.
-3. **Class count** -- every class you keep costs post-processing on every frame. A model
-   trained on the 10 classes you care about is meaningfully faster than the 80-class COCO
-   demo at the same resolution.
-
-### Measured performance -- ARTPEC-8, 80-class COCO
-
-End-to-end time (capture + preprocessing + inference + NMS), measured on a Q3536-LVE.
-This is what frame rate actually depends on.
-
-**YOLOv8n (nano)** -- the ARTPEC-8 workhorse:
-
-| Input | fps | latency | relative range |
-|---|---|---|---|
-| 416x256 | **43** | 23 ms | 0.7x |
-| **640x384** (default) | **20** | 50 ms | 1.0x |
-| 800x480 | 11 | 88 ms | 1.2x |
-| 960x544 | 9 | 106 ms | 1.4x |
-| 1280x736 | 5 | 200 ms | 1.9x |
-
-**YOLOv8s (small)** -- better accuracy, roughly 1.6x the latency of nano:
-
-| Input | fps | latency | relative range |
-|---|---|---|---|
-| 416x256 | 27 | 37 ms | 0.7x |
-| 640x384 | 12 | 81 ms | 1.0x |
-| 800x480 | 7 | 140 ms | 1.2x |
-| 960x544 | 6 | 172 ms | 1.4x |
-| 1280x736 | 3 | 315 ms | 1.9x |
-
-Latency scales **linearly with input pixels** and detection range scales with their
-**square root**: `latency (ms) ~ 213 x megapixels` for nano, `~ 334 x megapixels` for
-small. So four times the pixels buys twice the distance at four times the cost. You can
-read any point off these fits without measuring -- pick a latency budget, divide, and
-that is your pixel budget.
-
-Medium (yolov8m) is not recommended on ARTPEC-8 -- even 640x384 exceeds 300 ms. It is an
-ARTPEC-9 option.
-
-### Recommendations
-
-| Your priority | Configuration |
-|---|---|
-| **Speed** -- counting, presence, busy scenes | nano @ 416x256 or 640x384. 20-43 fps, ample headroom. |
-| **Balance** -- general perimeter / person & vehicle | **nano @ 640x384 (the default).** 20 fps, full field of view. |
-| **Distance** -- objects far from the camera | Raise resolution before model size. nano @ 960x544 or 1280x736 reaches ~1.4-1.9x the range at 9 / 5 fps. A narrower lens is also worth more than a bigger model -- it puts more pixels on a distant object for free. |
-| **Quality** -- small or visually similar objects up close | Step up to small at the same resolution before raising resolution further. |
-| **Any of the above** | **Cut the class list.** The tables are 80-class COCO; a 10-class model shifts every number down. Train on only what you act on. |
-
-**Why resolution beats model size for distance.** Detection range is set by how many
-pixels an object occupies at the network input, not by model capacity. A larger model
-cannot detect what the input resolution has already thrown away. At equal latency, a
-smaller model at higher resolution reaches further than a larger model at lower
-resolution. Reach for a bigger model when objects are *close but hard* (small, occluded,
-visually similar); reach for more pixels when objects are *far*.
-
-**Measure on your own hardware.** ARTPEC-9 is faster than ARTPEC-8 and these numbers
-will differ. Two scripts reproduce the tables:
-- `benchmark_resolutions.sh` -- uploads models through the app's own HTTP endpoint and
-  reads the reported end-to-end time. Needs only the camera web login. **These are the
-  real-world numbers above.**
-- `benchmark_larod.sh` -- times raw DLPU inference via `larod-client` over SSH, the way
-  [axis-model-zoo](https://github.com/AxisCommunications/axis-model-zoo) does. Faster to
-  run and good for *comparing* models, but it carries a fixed per-run overhead that a
-  running ACAP amortizes, so its absolute numbers are pessimistic below ~1 megapixel. Use
-  it for relative comparison, not for predicting frame rate.
+**Export and deployment**
+- **Calibrate on frames from the deploying camera at the exact export size**, 300 frames,
+  with objects at all distances and some empty scenes. A calibration set without the
+  objects skews the int8 ranges.
+- **Test on the camera.** The ARTPEC-9 DLPU can differ from a PC int8 run; use the app's
+  CPU mode (`chip` setting `cpu-tflite`) to tell a model problem from a DLPU problem.
+- **Budget ~5 FPS** for reliable events: the Accuracy vote looks at 500 ms of frames.
+  On ARTPEC-8, the camera's own object analytics take 30-40 % of the frame rate at larger
+  inputs.
+- **Use the classifier threshold** (e.g. 60 % with fallback to the rejection class) and
+  untick the rejection class, so uncertain objects never fire events.
 
 ***
 
@@ -393,28 +445,55 @@ DetectX delivers three primary payload types, all enrichable with the configured
 
 ## Version History
 
-## 5.4.0
+## 5.1.0
 
+Everything since 5.0.0; the 5.0.1 and 5.2.0-5.4.0 development builds are included.
+
+### Two-tier detection
+- **Two-tier models:** a detector finds objects in every frame, a classifier labels each
+  one from a crop. Events, MQTT and crops use the classifier's label; `detector_c` keeps
+  the detector's score.
+- **Stage 2 reads the camera's full resolution:** crops come from a second stream at the
+  largest 16:9 resolution of the active capture mode (setting `classifierHighRes`).
+- **Classifier threshold** with a fallback label: below `classifierConfidence` the label
+  becomes `classifierFallbackLabel`. The payload adds `classifier_label`, `classifier_c`
+  and `classifier_fallback` only when the fallback replaced the label.
+- **Default model: HandGesture's** hand detector (Hands v4 960x544 on ARTPEC-8, Hands v5
+  1280x736 on ARTPEC-9) and 15-gesture classifier, with matching default settings.
+
+### Detection and events
 - **Event trigger by time-based vote** ("Prioritize"), with a new **Balanced** option.
   Speed fires on the first frame. Balanced fires when a label is in >= 75 % of the frames
   with detections within 300 ms; Accuracy when it is in >= 3 frames and >= 60 % within
   500 ms. Both also require that no other label was seen more often, so brief
-  misclassifications (or the shapes a hand passes through while raised) do not fire.
-  The window stretches on slow cameras. Settings `eventLogic` `{window, frames, share}`
-  overrides. Replaces the frame-count window, which read a wrong status key and always
-  used 16 frames.
-- **No hidden minimum-size filter.** Its UI was removed in 4.0.0, but a 20/1000 default
-  kept dropping small, distant objects.
-- **Full-resolution crop export** like DetectX 5.1: the second stream also runs when crop
-  export has "Crop from Full Camera Resolution" on, not only for stage 2; capped to the
-  active capture mode. Crop payload adds `frame_w`/`frame_h`; crops only cut when the
-  throttle lets one out.
-- **Leaner payload:** `detector_c` (percent) always; `classifier_label`, `classifier_c` and
-  `classifier_fallback` only when the classifier threshold replaced the label.
+  misclassifications do not fire. Settings `eventLogic` `{window, frames, share}` override.
+- **View Areas:** run detection on one of the camera's View Areas (**View** on the live
+  page). Stage 2 and exported crops still come from the full sensor.
+- **No hidden minimum-size filter** (a 20/1000 default kept dropping small objects).
+- Confidence and NMS changes apply immediately.
+
+### Detection export
+- Crops from the full-resolution stream (setting `cropping.fullResolution`); the payload
+  adds `frame_w`/`frame_h`; crops are only cut when the throttle lets one out.
+
+### Web UI
+- Live view shows **FPS**; pages opened while the app starts wait and reload when the
+  model is ready; About shows the MQTT topics actually published.
+
+### Fixes
+- No crash on stop or restart (double frees of status/device/MQTT settings; video threads
+  and web requests running during shutdown).
 - A failed inference no longer crashes the application into a restart loop.
-- Bundled models: Hands v4 960x544 (tier 1) and gesture15 YOLOv8s-cls 128 (tier 2), as in
-  HandGesture 5.0.0.
-- 5.3.0 (included): generic classifier threshold with a user-set fallback label.
+
+### Repository
+- Application only: `tools/install-model.sh` (two-tier model package -> `app/model/`,
+  checked), `tools/check-model.sh` (detector + classifier contract check in Docker),
+  `tools/camera.sh`, benchmarks in `tools/`; [docs/MODEL_CONTRACT.md](docs/MODEL_CONTRACT.md),
+  [docs/BUILDING.md](docs/BUILDING.md), AGENTS.md.
+- Model files renamed: `model-<chip>.tflite`, `classifier-<chip>.tflite`, `labels.txt`,
+  `classifier-labels.txt` (were `<chip>-tier1/2.tflite`, `tier1/2-labels.txt`).
+- Training and export moved to acap-model-pipeline (`export_yolov8.py`,
+  `export_resolutions.sh`, `Train-Build.md`, COCO checkpoints).
 
 ## 5.0.0
 
