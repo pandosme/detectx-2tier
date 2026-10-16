@@ -6,7 +6,7 @@ crop. Results go out over MQTT, ONVIF events, HTTP, crop export and SD training 
 with the full DetectX feature set.
 
 The package ships **HandGesture's model** as a working default: a hand detector and a
-15-gesture classifier trained on the [HaGRID](https://github.com/hukenovs/hagrid) dataset
+15-gesture classifier trained on the [HaGRID](https://github.com/saehm/hagrid) hand-gesture dataset
 plus real camera footage. DetectX 2-Tier is meant as a **base for your own two-tier
 models**: it reads input sizes, class counts and quantization from the model files, so a
 pair you train and export with
@@ -69,33 +69,73 @@ it because it gives every object more pixels -- see *Range* below.
 The price of two tiers: two models to train, and the classifier runs once per detected
 object (13-20 ms each on ARTPEC-8), so many objects lower the frame rate.
 
-## The default model: hand gestures
+## The default model: HaGRID hand gestures
+
+The default model pair recognises hand gestures. Both models were trained on the
+[HaGRID](https://github.com/saehm/hagrid) hand-gesture dataset (HAnd Gesture Recognition
+Image Dataset: people showing gestures to a camera, with a box and a gesture label for every
+hand) combined with real footage from Axis cameras.
 
 | | ARTPEC-8 | ARTPEC-9 |
 |---|---|---|
-| Stage 1: hand detector (YOLOv8n, 1 class `hand`) | Hands v4 at **960x544** | Hands v5 at **1280x736** |
-| Stage 2: gesture classifier (YOLOv8s-cls) | gesture15, 128x128 | gesture15, 128x128 |
+| Stage 1: `hand` detector (YOLOv8n) | Hands v4 at **960x544** | Hands v5 at **1280x736** |
+| Stage 2: `gesture` classifier (YOLOv8s-cls) | gesture15, 128x128 | gesture15, 128x128 |
 | Frame rate, no hand / one hand | ~10 / 8.6 FPS | ~8 / 7 FPS |
 
-Gestures (classifier labels): call, dislike, fist, four, like, middle_finger, mute,
-no_gesture, ok, one, palm, peace, rock, stop, three.
+### `hand` -- the hand detector (stage 1)
 
-- **Hand detector:** trained on ~1,900 verified frames from five Axis cameras (indoor and
-  outdoor, day and night), HaGRID images with every hand labelled, and person-free frames.
-  Hands v5 is a fine-tune of v4 at the larger input; it finds 93 % of the test hands
-  against 88 % for v4, most of the gain on hands 32-64 px wide in a 4K image.
-- **Gesture classifier:** HaGRID gesture crops (6,000 per class) plus ~1,900 verified real
-  hands cut the way the app cuts them, with shifted and resized boxes to mimic the
-  detector's box errors, and false hand detections (elbows, plants) as `no_gesture`.
-  93-96 % right on held-out real hands; weakest are `fist` (read as `one`) and `three`
-  (read as `peace`).
-- **Default settings** for this model: detector confidence 40, NMS 0.2, classifier
-  threshold 60 % with fallback `no_gesture`, and `no_gesture` unticked so idle hands do not
-  fire events. If you install your own models, review these in
-  `app/settings/settings.json`.
-- Trained on one person and two cameras; expect lower accuracy for other people and
-  viewpoints. [HandGesture](https://github.com/pandosme/HandGesture) documents range and
-  performance for the same models in detail.
+Finds every hand in the frame, whatever its pose, and nothing else: it has one class,
+`hand`. It runs on every frame, on the whole image (or the selected View Area) scaled to
+its input size, and its score is reported as `detector_c`.
+
+- **Model:** YOLOv8n, int8, input 960x544 on ARTPEC-8 (Hands v4) and 1280x736 on
+  ARTPEC-9 (Hands v5, a fine-tune of v4 at the larger input).
+- **Training data:** HaGRID images with every hand labelled -- including the idle second
+  hand, so a relaxed hand is still a hand -- plus ~1,900 verified frames from five Axis
+  cameras (indoor and outdoor, day and night, 1080p to 4K) and ~350 frames without people.
+  Each version was trained at the input size it runs at; a detector learns object sizes in
+  pixels, and training at the deployment size raised the share of hands found from 83 % to
+  89 %.
+- **Accuracy:** share of test hands found, by hand width in a 4K image:
+
+  | Input | < 24 px | 24-32 px | 32-48 px | 48-64 px | 64 px + |
+  |---|---|---|---|---|---|
+  | 960x544 (ARTPEC-8) | ~45 % | ~80 % | ~84 % | ~87 % | ~97 % |
+  | 1280x736 (ARTPEC-9) | ~55 % | ~85 % | ~90 % | ~95 % | ~98 % |
+
+- **Limits:** int8 box coordinates are coarse (about 15 px steps on a 4K image), so small
+  boxes can sit slightly beside the hand. Some false hands on elbows, plants or tool
+  handles; the gesture classifier turns most of them into `no_gesture`.
+
+### `gesture` -- the gesture classifier (stage 2)
+
+Reads the gesture of each hand the detector found. For every hand box it cuts a square
+around the hand (longest side x 1.25) from the camera's **full-resolution** stream,
+scales it to 128x128 and classifies it. Its label is the detection's label in events,
+MQTT and crops.
+
+- **Model:** YOLOv8s-cls, int8, 128x128 input, 15 classes: `call`, `dislike`, `fist`,
+  `four`, `like`, `middle_finger`, `mute`, `no_gesture`, `ok`, `one`, `palm`, `peace`,
+  `rock`, `stop`, `three`. `no_gesture` is a hand doing none of the others (and false
+  hands).
+- **Training data:** HaGRID gesture crops, 6,000 per class, three quarters of them first
+  shrunk to 16-96 px to look like distant hands; ~1,900 verified real hands from an
+  indoor (2688x1512) and an outdoor (4K) Axis camera, cut exactly like the app cuts them,
+  each with 7 copies whose box is shifted up to 30 % and resized 1.05-1.7x to mimic the
+  detector's box errors; and false hand detections (elbows, plants) as `no_gesture`.
+  Vertical flip off (it would turn `like` into `dislike`).
+- **Accuracy** on 445 held-out real camera hands: 96.2 % (ARTPEC-9) and 94.6 % (ARTPEC-8)
+  with exact boxes, 93.7 % and 93.5 % with detector-like box errors. Weakest: `fist` (read
+  as `one`) and `three` (read as `peace`).
+- **Threshold:** below 60 % confidence the label becomes `no_gesture`
+  (`classifierConfidence`, `classifierFallbackLabel`), and `no_gesture` is unticked by
+  default, so uncertain or idle hands never fire events.
+
+Both models were trained on one person; expect lower accuracy for other people and
+viewpoints. [HandGesture](https://github.com/pandosme/HandGesture) uses the same models
+and documents range and performance in more detail. If you install your own models,
+review the defaults in `app/settings/settings.json`: detector confidence 40, NMS 0.2,
+classifier threshold 60 % with fallback `no_gesture`, `no_gesture` unticked.
 
 ## Quick Start
 
@@ -175,7 +215,7 @@ classifier:
 ```
 
 ```bash
-tools/get_base_weights.sh n s                          # COCO starting weights
+tools/get_base_weights.sh n s                          # YOLOv8 starting weights (COCO-pretrained)
 python pipeline.py all -c config/mymodel.yaml          # crops -> train both -> export both
 python pipeline.py install -c config/mymodel.yaml --resolution 960x544
 cd ~/acap/detectx-2tier && ./build.sh
@@ -447,7 +487,8 @@ DetectX delivers three primary payload types, all enrichable with the configured
 
 ## 5.1.0
 
-Everything since 5.0.0; the 5.0.1 and 5.2.0-5.4.0 development builds are included.
+First release of DetectX 2-Tier, built on DetectX 5.1.0. It includes the 5.0.1 and
+5.2.0-5.4.0 development builds.
 
 ### Two-tier detection
 - **Two-tier models:** a detector finds objects in every frame, a classifier labels each
@@ -495,159 +536,5 @@ Everything since 5.0.0; the 5.0.1 and 5.2.0-5.4.0 development builds are include
 - Training and export moved to acap-model-pipeline (`export_yolov8.py`,
   `export_resolutions.sh`, `Train-Build.md`, COCO checkpoints).
 
-## 5.0.0
-
-First YOLOv8 release. The YOLOv5 line (4.x) is frozen at 4.1.1 and no longer maintained.
-
-### Breaking changes
-- **YOLOv8 replaces YOLOv5.** Anchor-free head with two output tensors
-  (`[1,4,N]` coordinates and `[1,classes,N]` scores) instead of one fused
-  `[1,N,5+classes]`, and no objectness column. 4.x models will not load on 5.x.
-- **Separate ARTPEC-8 and ARTPEC-9 packages.** The A8 DLPU requires per-tensor
-  weight quantization, the A9 uses per-channel; the two are not interchangeable.
-  Previously a single package served both.
-- Models must be exported with `export_yolov8.py`, which produces uint8 I/O and the
-  split coordinate/score tensors the runtime needs. Ultralytics' built-in TFLite
-  export (float32 I/O, one fused tensor) cannot be decoded by this application.
-
-### New
-- Default model is **YOLOv8n COCO at 640x384** -- fast (~20 fps on ARTPEC-8) and
-  16:9 to match the scene. See **Choosing a configuration** for when to change it.
-- Built against the current Axis ACAP SDK (manifest schema 2.2.0), DLPU declared as
-  a required resource, `runMode: respawn`.
-- The application introspects the model at startup (input size, class count,
-  quantization), so any exported model drops in without code changes.
-- `export_resolutions.sh` / `benchmark_resolutions.sh` / `benchmark_larod.sh` for
-  exporting a model across resolutions and measuring latency on your own camera.
-- Model load is deferred past application start so the web UI stays responsive and
-  reports "Loading model" during the 30-60 s cold start instead of appearing hung.
-- PyTorch checkpoints for the shipped models are in `models/`.
-
-### Fixes
-- Corrected a double-free in larod teardown that aborted the process on every stop.
-
-### Requirements
-- **ARTPEC-9 requires Axis OS 13 or later.**
-
----
-
-## Legacy YOLOv5 Releases
-
-DetectX 5.x does not support YOLOv5 models. For an existing YOLOv5 deployment or
-further work on that model format, use the frozen legacy line instead:
-
-- **Latest legacy release:** [v4.1.1](https://github.com/pandosme/DetectX/tree/v4.1.1)
-- **Legacy development branch:** [4.1.0](https://github.com/pandosme/DetectX/tree/4.1.0)
-
-```bash
-git checkout v4.1.1  # last YOLOv5 release
-# or
-git checkout 4.1.0   # legacy development branch
-```
-
-The 4.x line is not compatible with v5 models or packages, and receives no new
-features.
-
-## 4.1.1
-
-- Fixed EAP release-asset publishing.
-
-## 4.1.0
-
-- Added polygon AOI and exclusion zones, runtime model upload, SD-card training
-  capture, and bounding-box overlay fixes.
-
-## 4.0.0 - February 2, 2026
-
-- Moved from normalized coordinates to model-input pixel coordinates.
-- Added automatic migration for existing AOI and size-filter settings.
-- Redesigned the web UI with top navigation and card-based layouts.
-- Removed the old `prepare.py` dependency; model parameters were extracted during
-  the Docker build.
-
-## 3.5.3 - November 29, 2025
-
-- Fixed a memory leak.
-
-## 3.5.2 - August 29, 2025
-
-- Fixed black-box video on selected cameras.
-
-## 3.5.1 - August 29, 2025
-
-- Added Detection Export, GUI updates, and MQTT improvements.
-
-## 3.4.0 - May 14, 2025
-
-- Cleaned up MQTT handling and fixed GUI and MQTT connection issues.
-
-## 3.3.10 - March 4, 2025
-
-- Refactored MQTT support.
-
-## 3.3.8 - February 27, 2025
-
-- Fixed a detection-page crash and MQTT stability issues.
-- Added MQTT connect messages and more last-will properties.
-
-## 3.3.7 - February 22, 2025
-
-- Improved MQTT stability and UI feedback for unsupported platforms, model
-  loading, and unavailable applications.
-
-## 3.3.6 - February 7, 2025
-
-- Fixed a UI-related crash during extended use.
-
-## 3.3.5 - February 2025
-
-- Fixed a serious memory leak and expanded About-page information.
-
-## 3.3.0 - December 21, 2024
-
-- Added MQTT support.
-
-## 3.2.0 - December 20, 2024
-
-- Updated the ACAP wrapper to 3.2.0.
-
-## 3.1.5 - December 11, 2024
-
-- Fixed event handling.
-
-## 3.1.0 - November 27, 2024
-
-- Updated the ACAP SDK, refactored application files, and added per-label
-  events and visualization improvements.
-
-## 2.2.0 - October 19, 2024
-
-- Added the Label Counter event and fixed detection transitions.
-
-## 2.1.1 - October 13, 2024
-
-- Fixed event states and a potential memory leak.
-
-## 2.1.0 - October 11, 2024
-
-- Added detection transitions and removed SD-card detection-image storage.
-
-## 1.2.0 - October 7, 2024
-
-- Added minimum-size filtering and fixed multiple detections in one scene.
-
-## 1.0.3 - September 15, 2024
-
-- Restructured model and settings configuration.
-
-## 1.0.2 - September 7, 2024
-
-- Fixed detection and SD-card image-storage issues.
-
-## 1.0.1 - September 6, 2024
-
-- Restructured SD-card detection-image storage and fixed reset behavior.
-
-## 1.0.0 - September 5, 2024
-
-- Initial release.
+DetectX 2-Tier is built on [DetectX](https://github.com/pandosme/DetectX) 5.x; the history of
+the single-stage application is in that repository.

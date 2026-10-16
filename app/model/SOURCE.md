@@ -1,7 +1,8 @@
 # Bundled models
 
 The default model pair is HandGesture's (HandGesture 5.1.0): a hand detector and a
-15-gesture classifier, trained on the HaGRID dataset plus real camera footage.
+15-gesture classifier, trained on the [HaGRID](https://github.com/saehm/hagrid) hand-gesture dataset plus real
+camera footage. The README describes both models (`hand` and `gesture`).
 
 | File | Model | Input |
 |---|---|---|
