@@ -49,7 +49,7 @@ jobs:
           version=$(python3 -c "import json; print(json.load(open('app/manifest.json', encoding='utf-8'))['acapPackageConf']['setup']['version'])")
 
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "artifact_name=detectx-${version}-eap" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=detectx-2tier-${version}-eap" >> "$GITHUB_OUTPUT"
 
       - name: Upload EAP artifact
         uses: actions/upload-artifact@v4
@@ -92,8 +92,8 @@ jobs:
             exit 1
           fi
 
-          cp "${a8_files[0]}" release-assets/DetectX_latest_artpec8.eap
-          cp "${a9_files[0]}" release-assets/DetectX_latest_artpec9.eap
+          cp "${a8_files[0]}" release-assets/DetectX_2-Tier_latest_artpec8.eap
+          cp "${a9_files[0]}" release-assets/DetectX_2-Tier_latest_artpec9.eap
 
       - name: Remove stale EAP release assets
         env:
